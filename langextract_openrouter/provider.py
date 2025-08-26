@@ -42,11 +42,15 @@ class openrouterLanguageModel(lx.inference.BaseLanguageModel):
             Lists of ScoredOutput objects, one per prompt.
         """
         for prompt in batch_prompts:
-            logging.info(f'Calling OpenRouter completion for model {self.model_id}')
+            try:
+                logging.info(f'Calling OpenRouter completion for model {self.model_id}')
 
-            result = self.client.chat.completions.create(
-                model=self.model_id,
-                messages=[{"role": "user", "content": str(prompt)}],
-                **self._extra_kwargs
-            )
-            yield [lx.inference.ScoredOutput(score=1.0, output=result.choices[0].message.content)]
+                result = self.client.chat.completions.create(
+                    model=self.model_id,
+                    messages=[{"role": "user", "content": str(prompt)}],
+                    **self._extra_kwargs
+                )
+                yield [lx.inference.ScoredOutput(score=1.0, output=result.choices[0].message.content)]
+            except Exception as e:
+                logging.error(f'Error calling OpenRouter completion for model {self.model_id}: {e}')
+                yield [lx.inference.ScoredOutput(score=0.0, output='')]  # Return empty output on error
