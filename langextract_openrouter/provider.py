@@ -37,13 +37,13 @@ def _sanitize_openrouter_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
 
     # Drop/disable streaming if user passed it
     if merged.get("stream") is True:
-        logging.warning("[openrouter] 'stream=True' requested but this provider is non-streaming; disabling.")
+        logging.warning("[openrouter-provider] 'stream=True' requested but this provider is non-streaming; disabling.")
         merged.pop("stream", None)
 
     clean: Dict[str, Any] = {k: v for k, v in merged.items() if k in _OPENROUTER_ALLOWED}
     dropped = set(merged.keys()) - set(clean.keys())
     if dropped:
-        logging.debug(f"[openrouter] Dropping unsupported params: {sorted(dropped)}")
+        logging.debug(f"[openrouter-provider] Dropping unsupported params: {sorted(dropped)}")
     return clean
 
 
@@ -63,12 +63,12 @@ def _map_response_format(format_type: Optional[str], json_schema: Optional[dict]
 
     if format_type == "json_schema":
         if not isinstance(json_schema, dict):
-            logging.warning("[openrouter] format_type='json_schema' requested but no/invalid schema provided; using empty schema.")
+            logging.warning("[openrouter-provider] format_type='json_schema' requested but no/invalid schema provided; using empty schema.")
             json_schema = {}
         return {"type": "json_schema", "json_schema": json_schema}
 
     # Unknown format_type → ignore but log
-    logging.debug(f"[openrouter] Unknown format_type={format_type!r}; ignoring.")
+    logging.debug(f"[openrouter-provider] Unknown format_type={format_type!r}; ignoring.")
     return None
 
 
@@ -102,7 +102,7 @@ def _extract_output(result: Any, prefer_json: bool) -> str:
                         if args:
                             return args
                 except Exception as e:
-                    logging.debug(f"[openrouter] tool_calls parsing error ignored: {e}")
+                    logging.debug(f"[openrouter-provider] tool_calls parsing error ignored: {e}")
 
         # 3) legacy 'text'
         text = getattr(choice, "text", None)
@@ -110,10 +110,20 @@ def _extract_output(result: Any, prefer_json: bool) -> str:
             return text
 
     except Exception as e:
-        logging.debug(f"[openrouter] Response extraction fallback: {e}")
+        logging.debug(f"[openrouter-provider] Response extraction fallback: {e}")
 
     # 4) final fallback
     return "{}" if prefer_json else ""
+
+
+def _safe_error_json(code: int, message: str, model_id: str) -> str:
+    """Always return valid JSON with a clear provider-prefixed error."""
+    safe_msg = f"openrouter-provider: {message}"
+    # Use repr to safely quote the message
+    return (
+        '{"_lx_error":{"provider":"openrouter",'
+        f'"model":"{model_id}","code":{code},"message":{repr(safe_msg)}}}'
+    )
 
 
 @lx.providers.registry.register(r"^openrouter", priority=10)
@@ -128,7 +138,18 @@ class openrouterLanguageModel(lx.inference.BaseLanguageModel):
 
         self.client = OpenAI(api_key=self.api_key, base_url="https://openrouter.ai/api/v1")
         self._extra_kwargs = kwargs or {}
-        logging.info(f"Initialized OpenRouter provider for model: {self.model_id}")
+        self._authed_ok = False  # lazy auth flag
+        logging.info(f"[openrouter-provider] Initialized OpenRouter provider for model: {self.model_id}")
+
+    def _preflight_auth(self):
+        """One-time auth sanity check for clearer failures."""
+        if self._authed_ok:
+            return
+        if not self.api_key:
+            raise RuntimeError(
+                "OPENROUTER_API_KEY not set. Export OPENROUTER_API_KEY or pass api_key=..."
+            )
+        self._authed_ok = True
 
     def _build_call_params(self, **runtime_kwargs: Any) -> tuple[dict, bool]:
         """
@@ -155,13 +176,23 @@ class openrouterLanguageModel(lx.inference.BaseLanguageModel):
         """
         Run inference on a batch of prompts, guaranteeing non-empty outputs:
           - JSON modes → '{}' if model returns nothing
-          - Text modes → '[EMPTY]' if model returns nothing
+          - Text modes → default to JSON '{}' for safety (or text if text_error_fallback=True)
         """
         call_params, prefer_json = self._build_call_params(**kwargs)
+        text_error_fallback = bool(kwargs.get("text_error_fallback", False))
+
+        # Ensure we have credentials before the first call
+        try:
+            self._preflight_auth()
+        except Exception as e:
+            err_json = _safe_error_json(401, str(e), self.model_id)
+            for _ in batch_prompts:
+                yield [lx.inference.ScoredOutput(score=0.0, output=err_json)]
+            return
 
         for prompt in batch_prompts:
             try:
-                logging.info(f"[openrouter] Calling model={self.model_id} with params={call_params!r}")
+                logging.info(f"[openrouter-provider] Calling model={self.model_id} with params={call_params!r}")
                 result = self.client.chat.completions.create(
                     model=self.model_id,
                     messages=[{"role": "user", "content": str(prompt)}],
@@ -172,11 +203,16 @@ class openrouterLanguageModel(lx.inference.BaseLanguageModel):
 
                 # Final guard against empty strings reaching LangExtract
                 if not (output or "").strip():
-                    output = "{}" if prefer_json else "[EMPTY]"
+                    # Prefer a valid JSON object to avoid parser failures upstream.
+                    output = "{}" if prefer_json else ("[EMPTY]" if text_error_fallback else "{}")
 
                 yield [lx.inference.ScoredOutput(score=1.0, output=output)]
 
             except Exception as e:
-                logging.error(f"[openrouter] Error calling completion (model={self.model_id}): {e}")
-                fallback = "{}" if prefer_json else "[ERROR]"
+                logging.error(f"[openrouter-provider] Error calling completion (model={self.model_id}): {e}")
+                # Try to extract HTTP status; default to 500
+                code = getattr(getattr(e, "response", None), "status_code", None) or 500
+                fallback = _safe_error_json(int(code), str(e), self.model_id)
+                if text_error_fallback and not prefer_json:
+                    fallback = f"openrouter-provider: {e}"
                 yield [lx.inference.ScoredOutput(score=0.0, output=fallback)]
