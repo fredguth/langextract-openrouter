@@ -125,6 +125,14 @@ def _safe_error_json(code: int, message: str, model_id: str) -> str:
         f'"model":"{model_id}","code":{code},"message":{repr(safe_msg)}}}'
     )
 
+OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_HTTP_REFERER = os.environ.get("OPENROUTER_HTTP_REFERER", "https://github.com/Gutenback/langextract-openrouter")
+OPENROUTER_APP_TITLE = os.environ.get("OPENROUTER_APP_TITLE", "LangExtract OpenRouter Provider")
+
+def _mask(key: str | None, keep: int = 6) -> str:
+    if not key:
+        return "<none>"
+    return key[:keep] + "…(" + str(len(key)) + " chars)"
 
 @lx.providers.registry.register(r"^openrouter", priority=10)
 class openrouterLanguageModel(lx.inference.BaseLanguageModel):
@@ -136,7 +144,15 @@ class openrouterLanguageModel(lx.inference.BaseLanguageModel):
         self.original_model_id = model_id
         self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
 
-        self.client = OpenAI(api_key=self.api_key, base_url="https://openrouter.ai/api/v1")
+        self.client = OpenAI(
+                    api_key=self.api_key,
+                    base_url=OPENROUTER_BASE_URL,
+                    default_headers={
+                        "Authorization": f"Bearer {self.api_key or ''}",
+                        "HTTP-Referer": OPENROUTER_HTTP_REFERER,
+                        "X-Title": OPENROUTER_APP_TITLE,
+                    },
+                )
         self._extra_kwargs = kwargs or {}
         self._authed_ok = False  # lazy auth flag
         logging.info(f"[openrouter-provider] Initialized OpenRouter provider for model: {self.model_id}")
