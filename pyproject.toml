@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
+    "jupyter>=1.1.1",
     "langextract>=1.0.0",
     # Add your provider's SDK dependencies here
     "openai>=1.101.0",

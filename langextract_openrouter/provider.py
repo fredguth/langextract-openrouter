@@ -41,6 +41,9 @@ class openrouterLanguageModel(lx.inference.BaseLanguageModel):
         Yields:
             Lists of ScoredOutput objects, one per prompt.
         """
+        # Merge kwargs with extra_kwargs
+        merged_kwargs = {**self._extra_kwargs, **kwargs}
+
         for prompt in batch_prompts:
             try:
                 logging.info(f'Calling OpenRouter completion for model {self.model_id}')
@@ -48,7 +51,8 @@ class openrouterLanguageModel(lx.inference.BaseLanguageModel):
                 result = self.client.chat.completions.create(
                     model=self.model_id,
                     messages=[{"role": "user", "content": str(prompt)}],
-                    **self._extra_kwargs
+                    response_format={"type": "json_object"},
+                    **merged_kwargs
                 )
                 yield [lx.inference.ScoredOutput(score=1.0, output=result.choices[0].message.content)]
             except Exception as e:
